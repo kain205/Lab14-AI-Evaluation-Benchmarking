@@ -3,7 +3,7 @@
 **Nhóm thực hiện:** Nguyễn Bình Thành (2A202600138) · Hàn Quang Hiếu (2A202600056) · Phan Anh Khôi (2A202600276)
 
 ## 🎯 Tổng quan
-"Nếu bạn không thể đo lường nó, bạn không thể cải thiện nó." — Nhiệm vụ của nhóm bạn là xây dựng một **Hệ thống đánh giá tự động** chuyên nghiệp để benchmark AI Agent. Hệ thống này phải chứng minh được bằng con số cụ thể: Agent đang tốt ở đâu và tệ ở đâu.
+Nhóm mình xây dựng một **hệ thống benchmark AI Agent** dựa trên data RAG của XanhSM FAQ. Bài làm tập trung vào việc đo rõ chất lượng retrieval, chất lượng trả lời và độ ổn định giữa các phiên bản agent, để thấy agent đang tốt ở đâu và còn lỗi ở đâu.
 
 ---
 
