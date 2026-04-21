@@ -66,6 +66,9 @@ async def run_benchmark_with_results(agent_version: str, agent=None):
     runner = BenchmarkRunner(agent, ExpertEvaluator(), MultiModelJudge())
     results = await runner.run_all(dataset)
 
+    for r in results:
+        r["agent_version"] = agent_version
+
     total = len(results)
     summary = {
         "metadata": {"version": agent_version, "total": total, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
@@ -100,10 +103,21 @@ async def main():
     print(f"\nDelta V3 vs V1: {'+' if delta >= 0 else ''}{delta:.2f}")
 
     os.makedirs("reports", exist_ok=True)
+    comparison = {
+        "summaries": {
+            "V1-Base":    v1_summary,
+            "V2-Rewrite": v2_summary,
+            "V3-Clarify": v3_summary,
+        },
+        "delta_v3_vs_v1": round(delta, 3),
+    }
     with open("reports/summary.json", "w", encoding="utf-8") as f:
-        json.dump(v3_summary, f, ensure_ascii=False, indent=2)
+        json.dump(comparison, f, ensure_ascii=False, indent=2)
     with open("reports/benchmark_results.json", "w", encoding="utf-8") as f:
-        json.dump(v3_results, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {"V1-Base": v1_results, "V2-Rewrite": v2_results, "V3-Clarify": v3_results},
+            f, ensure_ascii=False, indent=2,
+        )
 
     if delta > 0:
         print("✅ QUYẾT ĐỊNH: CHẤP NHẬN BẢN CẬP NHẬT (APPROVE)")
