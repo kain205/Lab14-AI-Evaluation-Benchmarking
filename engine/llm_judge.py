@@ -221,5 +221,105 @@ Không thêm bất kỳ trường nào khác."""
             "consensus_type": consensus_type,
         }
 
-    async def check_position_bias(self, response_a: str, response_b: str):
-        pass
+    async def check_position_bias(
+        self,
+        response_a: str,
+        response_b: str,
+        question: str = "",
+        ground_truth: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Chấm điểm từng rubric cho cả 2 response, sau đó hoán đổi vị trí và chấm lại.
+        Nếu điểm của một response thay đổi đáng kể khi đổi vị trí → có position bias.
+        """
+        rubric_block = "\n\n".join(
+            f"[{c.upper()}]\n{desc}" for c, desc in self.rubrics.items()
+        )
+
+        def _build_scoring_prompt(first: str, second: str) -> str:
+            return f"""{rubric_block}
+
+{"Câu hỏi: " + question if question else ""}
+{"Ground Truth: " + ground_truth if ground_truth else ""}
+
+Hãy chấm điểm từng tiêu chí (1-5) cho hai câu trả lời sau:
+
+Câu trả lời FIRST: {first}
+Câu trả lời SECOND: {second}
+
+Trả về JSON:
+{{
+  "first":  {{"accuracy": <1-5>, "professionalism": <1-5>, "safety": <1-5>}},
+  "second": {{"accuracy": <1-5>, "professionalism": <1-5>, "safety": <1-5>}}
+}}"""
+
+        async def _call_scoring(prompt: str) -> Dict[str, Dict[str, int]]:
+            resp = await self.llm.chat.completions.create(
+                model=self.model_a,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=150,
+                temperature=0,
+            )
+            try:
+                return json.loads(resp.choices[0].message.content)
+            except Exception:
+                empty = {c: 0 for c in self.rubrics}
+                return {"first": empty, "second": empty}
+
+        # Gọi song song: normal (A=first, B=second) và swapped (B=first, A=second)
+        normal_raw, swapped_raw = await asyncio.gather(
+            _call_scoring(_build_scoring_prompt(response_a, response_b)),
+            _call_scoring(_build_scoring_prompt(response_b, response_a)),
+        )
+
+        # normal:  first=A, second=B
+        # swapped: first=B, second=A → đảo lại để quy về A/B
+        scores_normal  = {"a": normal_raw.get("first",  {}), "b": normal_raw.get("second", {})}
+        scores_swapped = {"a": swapped_raw.get("second", {}), "b": swapped_raw.get("first",  {})}
+
+        criteria = list(self.rubrics.keys())
+
+        def _avg(scores: Dict[str, int]) -> float:
+            vals = [scores.get(c, 0) for c in criteria]
+            return round(sum(vals) / len(vals), 2) if vals else 0.0
+
+        avg_a_normal  = _avg(scores_normal["a"])
+        avg_b_normal  = _avg(scores_normal["b"])
+        avg_a_swapped = _avg(scores_swapped["a"])
+        avg_b_swapped = _avg(scores_swapped["b"])
+
+        # Bias nếu điểm của cùng một response thay đổi > 0.5 khi đổi vị trí
+        bias_a = abs(avg_a_normal - avg_a_swapped) > 0.5
+        bias_b = abs(avg_b_normal - avg_b_swapped) > 0.5
+        is_biased = bias_a or bias_b
+
+        return {
+            "is_biased": is_biased,
+            "normal_order":  {"score_a": avg_a_normal,  "score_b": avg_b_normal,  "per_criterion": scores_normal},
+            "swapped_order": {"score_a": avg_a_swapped, "score_b": avg_b_swapped, "per_criterion": scores_swapped},
+            "drift": {"response_a": round(avg_a_normal - avg_a_swapped, 2), "response_b": round(avg_b_normal - avg_b_swapped, 2)},
+            "note": "Position bias detected: scores shift when responses are reordered" if is_biased else "No position bias detected",
+        }
+
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    judge = LLMJudge(openai_api_key=os.getenv("OPENAI_API_KEY"))
+
+    question     = "Phí chuyển khoản ngoài hệ thống là bao nhiêu?"
+    ground_truth = "Phí chuyển khoản ngoài hệ thống là 11.000đ/giao dịch, áp dụng cho các giao dịch dưới 10 triệu đồng."
+    response_a   = "Phí chuyển khoản ngoài hệ thống là 11.000đ/giao dịch, áp dụng cho giao dịch dưới 10 triệu đồng."
+    response_b   = "Phí chuyển khoản là 11.000đ."
+
+    result = asyncio.run(judge.check_position_bias(response_a, response_b, question, ground_truth))
+
+    print(f"Is biased : {result['is_biased']}")
+    print(f"Note      : {result['note']}")
+    print(f"\nNormal order  → score_a={result['normal_order']['score_a']}  score_b={result['normal_order']['score_b']}")
+    print(f"Swapped order → score_a={result['swapped_order']['score_a']} score_b={result['swapped_order']['score_b']}")
+    print(f"\nDrift  response_a={result['drift']['response_a']:+.2f}  response_b={result['drift']['response_b']:+.2f}")
+    print("(drift > 0.5 trên một response = judge bị ảnh hưởng bởi vị trí)")
