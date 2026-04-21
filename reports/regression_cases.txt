@@ -1,0 +1,36 @@
+REGRESSION REPORT — 2026-04-21 17:29:56
+Cases where V1 outscores V3 by >= 0.30: 2
+
+================================================================================
+CASE #1  |  V1(3.50) > V3(2.70)
+Type: Tài xế GSM không có lương cơ bản đúng không?
+
+QUESTION: Tài xế GSM không có lương cơ bản đúng không?
+
+                  V1                    |               V3-Clarify               
+              score: 3.5                |               score: 2.7               
+--------------------------------------------------------------------------------
+Tài xế Xanh SM Bike không có lương cứng. Thu nhập sẽ dựa trên doanh thu của | Tài xế Xanh SM Bike không có lương cứng. Thu nhập của họ dựa trên doanh thu
+chuyến đi và các khoản thưởng.          | của chuyến đi và thưởng doanh thu hoạt động.
+
+  accuracy         V1=3.5  V3=2.5
+  professionalism  V1=3.5  V3=3.5
+  safety           V1=3.5  V3=2.5
+
+================================================================================
+CASE #2  |  V1(3.40) > V3(2.65)
+Type: Xanh SM có cung cấp mũ bảo hiểm cho khách hàng không?
+
+QUESTION: Xanh SM có cung cấp mũ bảo hiểm cho khách hàng không?
+
+                  V1                    |               V3-Clarify               
+              score: 3.4                |               score: 2.65              
+--------------------------------------------------------------------------------
+Theo thông tin trong dữ liệu, nếu bạn gặp tình trạng thiếu mũ bảo hiểm trong | Trong trường hợp bạn gặp phải chuyến xe không có mũ bảo hiểm, bạn có thể để
+chuyến xe, bạn có thể để lại đánh giá và báo cáo chi tiết qua mục "Trung tâm | lại đánh giá và báo cáo chi tiết về vấn đề này qua mục "Trung tâm hỗ trợ"
+hỗ trợ" trên ứng dụng. Điều này cho thấy rằng Xanh SM có trách nhiệm cung | trên ứng dụng Xanh SM. Xanh SM cam kết sẽ kiểm tra và xử lý tình huống này.
+cấp mũ bảo hiểm cho khách hàng.         |                                        
+
+  accuracy         V1=3.0  V3=2.0
+  professionalism  V1=3.5  V3=3.0
+  safety           V1=4.0  V3=3.5
