@@ -6,12 +6,13 @@ import time
 from dotenv import load_dotenv
 from engine.runner import BenchmarkRunner
 from engine.llm_judge import LLMJudge
+from engine.retrieval_eval import RetrievalEvaluator as _RetEval
 from agent.main_agent import AgentV1, AgentV2, AgentV3
 
 load_dotenv()
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
-MAX_CASES = 10  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+MAX_CASES = 5  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -20,12 +21,19 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # ── Giữ nguyên tên class từ template, fill thật vào ──────────────────────────
 
 class ExpertEvaluator:
-    """Retrieval evaluator — stub cho đến khi retrieval_eval được wire đầy đủ."""
+    def __init__(self):
+        self._eval = _RetEval()
+
     async def score(self, case, resp):
+        ground_truth_ids = case.get("ground_truth_ids", [])
+        retrieved_ids = resp.get("retrieved_ids", [])
         return {
             "faithfulness": 0.0,
             "relevancy": 0.0,
-            "retrieval": {"hit_rate": 0.0, "mrr": 0.0},
+            "retrieval": {
+                "hit_rate": self._eval.calculate_hit_rate(ground_truth_ids, retrieved_ids),
+                "mrr": self._eval.calculate_mrr(ground_truth_ids, retrieved_ids),
+            },
         }
 
 class MultiModelJudge:
@@ -86,8 +94,8 @@ async def run_benchmark(version, agent=None):
 
 
 async def main():
-    v1_summary = await run_benchmark("Agent_V1_Base", AgentV1())
-    v2_summary = await run_benchmark("Agent_V2_Rewrite", AgentV2())
+    v1_results, v1_summary = await run_benchmark_with_results("Agent_V1_Base", AgentV1())
+    v2_results, v2_summary = await run_benchmark_with_results("Agent_V2_Rewrite", AgentV2())
     v3_results, v3_summary = await run_benchmark_with_results("Agent_V3_Clarify", AgentV3())
 
     if not v1_summary or not v3_summary:

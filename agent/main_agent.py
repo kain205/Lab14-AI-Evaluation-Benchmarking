@@ -46,8 +46,9 @@ async def _retrieve(query: str, top_k: int = 5) -> list[dict]:
     results = collection.query(query_texts=[query], n_results=top_k)
     chunks = []
     if results and results["metadatas"]:
-        for meta in results["metadatas"][0]:
+        for doc_id, meta in zip(results["ids"][0], results["metadatas"][0]):
             chunks.append({
+                "id": doc_id,
                 "question": meta.get("question", ""),
                 "answer": meta.get("answer", ""),
             })
@@ -80,16 +81,17 @@ class AgentV1:
 
     name = "XanhSM-V1-Base"
 
-    async def query(self, question: str, **_) -> dict:
+    async def query(self, question: str, history: list = None, **_) -> dict:
         chunks = await _retrieve(question, top_k=5)
-        messages = [
-            {"role": "system", "content": SYSTEM_BASIC.format(context=_build_context(chunks))},
-            {"role": "user", "content": question},
-        ]
+        messages = [{"role": "system", "content": SYSTEM_BASIC.format(context=_build_context(chunks))}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": question})
         answer = await _call_llm(messages)
         return {
             "answer": answer,
             "contexts": [c["question"] for c in chunks],
+            "retrieved_ids": [c["id"] for c in chunks],
             "metadata": {"agent": self.name, "chunks_used": len(chunks)},
         }
 
@@ -99,21 +101,22 @@ class AgentV2:
 
     name = "XanhSM-V2-Rewrite"
 
-    async def query(self, question: str, **_) -> dict:
-        rag_query = await rewrite_query(question, [])
+    async def query(self, question: str, history: list = None, **_) -> dict:
+        rag_query = await rewrite_query(question, history or [])
         chunks = await _retrieve(rag_query, top_k=5)
         system = SYSTEM_FULL.format(
             context=_build_context(chunks),
             clarification_rule="",
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ]
+        messages = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": question})
         answer = await _call_llm(messages)
         return {
             "answer": answer,
             "contexts": [c["question"] for c in chunks],
+            "retrieved_ids": [c["id"] for c in chunks],
             "metadata": {"agent": self.name, "chunks_used": len(chunks), "rewritten_query": rag_query},
         }
 
@@ -123,21 +126,22 @@ class AgentV3:
 
     name = "XanhSM-V3-Clarify"
 
-    async def query(self, question: str, **_) -> dict:
-        rag_query = await rewrite_query(question, [])
+    async def query(self, question: str, history: list = None, **_) -> dict:
+        rag_query = await rewrite_query(question, history or [])
         chunks = await _retrieve(rag_query, top_k=5)
         system = SYSTEM_FULL.format(
             context=_build_context(chunks),
             clarification_rule=CLARIFICATION_RULE,
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ]
+        messages = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": question})
         answer = await _call_llm(messages)
         return {
             "answer": answer,
             "contexts": [c["question"] for c in chunks],
+            "retrieved_ids": [c["id"] for c in chunks],
             "metadata": {"agent": self.name, "chunks_used": len(chunks), "rewritten_query": rag_query},
         }
 
