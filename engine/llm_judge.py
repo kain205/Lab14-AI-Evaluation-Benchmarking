@@ -1,15 +1,12 @@
-import asyncio
 import re
 from typing import Dict, Any
 from openai import AsyncOpenAI
-import google.generativeai as genai
+import asyncio
 
 
 class LLMJudge:
-    def __init__(self, openai_api_key: str, gemini_api_key: str):
-        self.llm_a = AsyncOpenAI(api_key=openai_api_key)
-        genai.configure(api_key=gemini_api_key)
-        self.llm_b = genai.GenerativeModel("gemini-2.5-flash")
+    def __init__(self, openai_api_key: str, gemini_api_key: str = ""):
+        self.llm = AsyncOpenAI(api_key=openai_api_key)
 
         self.rubrics = {
             "accuracy": """Chấm điểm độ chính xác của câu trả lời FAQ từ 1-5:
@@ -47,35 +44,37 @@ Chỉ trả về một số nguyên từ 1 đến 5."""
         match = re.search(r"[1-5]", text.strip())
         return int(match.group()) if match else 1
 
-    async def _call_openai(self, prompt: str) -> int:
-        response = await self.llm_a.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
-            temperature=0,
-        )
-        return self._parse_score(response.choices[0].message.content)
-
-    async def _call_gemini(self, prompt: str) -> int:
-        response = await asyncio.to_thread(self.llm_b.generate_content, prompt)
-        return self._parse_score(response.text)
+    async def _call_model(self, prompt: str, model: str) -> int:
+        for attempt in range(3):
+            try:
+                response = await self.llm.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=10,
+                    temperature=0,
+                )
+                return self._parse_score(response.choices[0].message.content)
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    await asyncio.sleep(2 ** attempt * 5)
+                else:
+                    raise
 
     async def evaluate_multi_judge(self, question: str, answer: str, ground_truth: str) -> Dict[str, Any]:
         criteria = list(self.rubrics.keys())
 
-        # Gọi song song tất cả rubric cho cả 2 model
-        openai_tasks = [self._call_openai(self._build_prompt(c, question, answer, ground_truth)) for c in criteria]
-        gemini_tasks = [self._call_gemini(self._build_prompt(c, question, answer, ground_truth)) for c in criteria]
-        openai_scores, gemini_scores = await asyncio.gather(
-            asyncio.gather(*openai_tasks),
-            asyncio.gather(*gemini_tasks),
+        # Judge A: gpt-4o-mini  |  Judge B: gpt-4o
+        tasks_a = [self._call_model(self._build_prompt(c, question, answer, ground_truth), "gpt-4o-mini") for c in criteria]
+        tasks_b = [self._call_model(self._build_prompt(c, question, answer, ground_truth), "gpt-4o") for c in criteria]
+        scores_a_list, scores_b_list = await asyncio.gather(
+            asyncio.gather(*tasks_a),
+            asyncio.gather(*tasks_b),
         )
 
-        scores_a = dict(zip(criteria, openai_scores))
-        scores_b = dict(zip(criteria, gemini_scores))
+        scores_a = dict(zip(criteria, scores_a_list))
+        scores_b = dict(zip(criteria, scores_b_list))
 
         discrepancies = {c: abs(scores_a[c] - scores_b[c]) for c in criteria}
-        # Khi 2 judge lệch nhau > 1 điểm, lấy điểm trung bình để tránh thiên vị
         final_scores = {
             c: (scores_a[c] + scores_b[c]) / 2 if discrepancies[c] > 1 else scores_a[c]
             for c in criteria
@@ -91,12 +90,9 @@ Chỉ trả về một số nguyên từ 1 đến 5."""
             "discrepancies": discrepancies,
             "individual_scores": {
                 "gpt-4o-mini": scores_a,
-                "gemini-2.5-flash": scores_b,
+                "gpt-4o": scores_b,
             },
         }
 
     async def check_position_bias(self, response_a: str, response_b: str):
-        """
-        Nâng cao: Thực hiện đổi chỗ response A và B để xem Judge có thiên vị vị trí không.
-        """
         pass
