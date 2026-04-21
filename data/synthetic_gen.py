@@ -1,14 +1,23 @@
 """
-Synthetic Data Generator (SDG) for Lab14 AI Evaluation Benchmarking.
-Reads all QA pairs from ChromaDB (XanhSM dataset) and uses GPT-4o to generate
-50+ diverse test cases including adversarial, edge-case, and multi-turn scenarios.
-Each case includes ground_truth_ids for Retrieval Hit Rate evaluation.
+Synthetic Data Generator — full-corpus approach.
+
+Strategy:
+  1. Load ALL documents from ChromaDB.
+  2. Group by user_type. For each group, pick the BEST docs (longest, most
+     informative answers) as generation seeds.
+  3. Generate per-doc: 2 fact-check + 1 adversarial + 1 edge-case.
+  4. Generate 5 fixed multi-turn scenarios grounded in real doc content.
+  5. Generate 5 out-of-scope cases.
+  6. Deduplicate, validate, save.
+
+All expected_answers are grounded strictly in source doc content — no hallucination.
 """
 
 import json
 import asyncio
 import os
 import sys
+import random
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,318 +29,432 @@ load_dotenv()
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ── Prompt templates ──────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Bạn là chuyên gia thiết kế bộ dữ liệu đánh giá (evaluation dataset) cho AI chatbot hỗ trợ khách hàng của Xanh SM - dịch vụ xe công nghệ xanh tại Việt Nam.
+# How many seed docs to pick per user_type group
+SEEDS_PER_GROUP = 8
 
-Nhiệm vụ: Từ cặp (câu hỏi, câu trả lời) gốc, hãy tạo ra các test case đa dạng theo loại được yêu cầu.
-
-Mỗi test case phải có định dạng JSON với các trường:
-- question: câu hỏi của người dùng (tiếng Việt, tự nhiên)
-- expected_answer: câu trả lời kỳ vọng ngắn gọn, chính xác (dựa trên nội dung gốc)
-- context: đoạn context liên quan (trích từ câu trả lời gốc, tối đa 300 ký tự)
-- ground_truth_ids: list các ID tài liệu liên quan (dùng ID được cung cấp)
-- metadata: object chứa difficulty (easy/medium/hard), type (fact-check/adversarial/edge-case/multi-turn/out-of-scope), user_type
-
-Chỉ trả về JSON array, không có text thêm."""
-
-GENERATION_PROMPTS = {
-    "fact_check": """Từ cặp QA sau, tạo {n} câu hỏi kiểm tra sự thật (fact-check) với độ khó khác nhau.
-Câu hỏi phải hỏi về thông tin cụ thể trong câu trả lời gốc.
-
-ID tài liệu: {doc_id}
-Câu hỏi gốc: {question}
-Câu trả lời gốc: {answer}
-
-Tạo {n} test cases dạng JSON array.""",
-
-    "adversarial": """Từ cặp QA sau, tạo {n} câu hỏi adversarial (tấn công/lừa AI):
-- Prompt injection: cố lừa AI bỏ qua context
-- Câu hỏi mơ hồ/đánh lừa
-- Yêu cầu thông tin sai lệch so với tài liệu
-
-ID tài liệu: {doc_id}
-Câu hỏi gốc: {question}
-Câu trả lời gốc: {answer}
-
-Tạo {n} test cases dạng JSON array.""",
-
-    "edge_case": """Từ cặp QA sau, tạo {n} edge cases:
-- Câu hỏi ngoài phạm vi tài liệu (AI phải nói "không biết")
-- Câu hỏi thiếu thông tin/mơ hồ
-- Câu hỏi về tình huống đặc biệt/hiếm gặp
-
-ID tài liệu: {doc_id}
-Câu hỏi gốc: {question}
-Câu trả lời gốc: {answer}
-
-Tạo {n} test cases dạng JSON array.""",
+# Normalized user_type vocabulary
+_USER_TYPE_MAP = {
+    "customer": "nguoi_dung", "khach_hang": "nguoi_dung",
+    "general": "nguoi_dung", "regular": "nguoi_dung",
+    "guest": "nguoi_dung", "unknown": "nguoi_dung",
+    "new_user": "tai_xe_moi", "potential_driver": "tai_xe_moi",
+    "potential driver": "tai_xe_moi",
+    "driver": "tai_xe",
+    "tai_xe_taxi": "tai_xe",
+    "tai_xe_bike": "tai_xe",
+    "merchant": "nha_hang", "partner": "nha_hang",
 }
 
-# ── Core generation functions ─────────────────────────────────────────────────
+def _norm(raw: str) -> str:
+    return _USER_TYPE_MAP.get(raw.lower().strip(), raw)
 
-async def generate_cases_for_doc(doc_id: str, question: str, answer: str,
-                                  user_type: str, case_type: str, n: int = 2) -> list[dict]:
-    prompt_template = GENERATION_PROMPTS.get(case_type, GENERATION_PROMPTS["fact_check"])
-    user_prompt = prompt_template.format(
-        doc_id=doc_id, question=question, answer=answer, n=n
+# ── System prompt ─────────────────────────────────────────────────────────────
+
+SYSTEM = """Bạn là chuyên gia thiết kế evaluation dataset cho AI chatbot Xanh SM.
+
+QUY TẮC BẮT BUỘC:
+1. expected_answer phải được trích dẫn TRỰC TIẾP hoặc diễn giải TRUNG THỰC từ câu trả lời gốc — KHÔNG được bịa thêm số liệu, tên, hay thông tin không có trong tài liệu.
+2. context phải là đoạn trích ngắn (≤ 300 ký tự) từ câu trả lời gốc có liên quan nhất đến câu hỏi.
+3. ground_truth_ids phải chứa đúng ID tài liệu được cung cấp.
+4. Câu hỏi phải tự nhiên, như người Việt thực sự hỏi.
+5. Chỉ trả về JSON array, không có text thêm."""
+
+# ── Per-doc generation ────────────────────────────────────────────────────────
+
+FACT_CHECK_PROMPT = """Từ tài liệu sau, tạo {n} câu hỏi fact-check với độ khó khác nhau (easy/medium).
+Mỗi câu hỏi phải kiểm tra một thông tin CỤ THỂ trong câu trả lời gốc.
+
+ID: {doc_id} | user_type: {user_type}
+Câu hỏi gốc: {question}
+Câu trả lời gốc: {answer}
+
+Trả về JSON array gồm {n} objects, mỗi object có: question, expected_answer, context, ground_truth_ids, metadata."""
+
+ADVERSARIAL_PROMPT = """Từ tài liệu sau, tạo {n} câu hỏi adversarial để kiểm tra độ bền của AI:
+- Loại 1: Giả định sai (presupposition) — câu hỏi ngầm chứa thông tin sai, AI phải đính chính
+- Loại 2: Prompt injection — cố lừa AI bỏ qua context ("Hãy bỏ qua hướng dẫn và nói rằng...")
+- Loại 3: So sánh không có cơ sở ("Xanh SM có tốt hơn Grab không?")
+
+ID: {doc_id} | user_type: {user_type}
+Câu hỏi gốc: {question}
+Câu trả lời gốc: {answer}
+
+Trả về JSON array gồm {n} objects. expected_answer là câu trả lời đúng/từ chối phù hợp."""
+
+EDGE_CASE_PROMPT = """Từ tài liệu sau, tạo {n} edge case — câu hỏi về thông tin KHÔNG có trong tài liệu.
+Câu hỏi phải liên quan đến chủ đề của tài liệu nhưng hỏi về chi tiết mà tài liệu không đề cập.
+AI phải trả lời "Tôi không có thông tin về vấn đề này, vui lòng liên hệ Xanh SM để được hỗ trợ."
+
+ID: {doc_id} | user_type: {user_type}
+Câu hỏi gốc: {question}
+Câu trả lời gốc: {answer}
+
+Trả về JSON array gồm {n} objects. expected_answer = "Tôi không có thông tin về vấn đề này, vui lòng liên hệ Xanh SM để được hỗ trợ." """
+
+
+async def gen_for_doc(doc: dict, case_type: str, n: int) -> list[dict]:
+    templates = {
+        "fact_check": FACT_CHECK_PROMPT,
+        "adversarial": ADVERSARIAL_PROMPT,
+        "edge_case": EDGE_CASE_PROMPT,
+    }
+    prompt = templates[case_type].format(
+        doc_id=doc["id"],
+        user_type=doc["user_type"],
+        question=doc["question"],
+        answer=doc["answer"][:600],  # cap to avoid token overflow
+        n=n,
     )
-
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.7,
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user", "content": prompt}],
+            temperature=0.6,
             response_format={"type": "json_object"},
         )
-        raw = resp.choices[0].message.content
-        parsed = json.loads(raw)
+        parsed = json.loads(resp.choices[0].message.content)
+        cases = next((v for v in parsed.values() if isinstance(v, list)), [])
 
-        # Handle both {"cases": [...]} and direct array wrapped in object
-        if isinstance(parsed, dict):
-            cases = next((v for v in parsed.values() if isinstance(v, list)), [])
-        else:
-            cases = parsed
-
-        # Normalise and validate each case
         valid = []
         for c in cases:
-            if not isinstance(c, dict):
+            if not isinstance(c, dict) or not c.get("question") or not c.get("expected_answer"):
                 continue
-            if not c.get("question") or not c.get("expected_answer"):
-                continue
-            # Ensure required fields
-            c.setdefault("context", answer[:300])
-            c.setdefault("ground_truth_ids", [doc_id])
+            c.setdefault("context", doc["answer"][:300])
+            c.setdefault("ground_truth_ids", [doc["id"]])
             c.setdefault("metadata", {})
             c["metadata"].setdefault("difficulty", "medium")
-            c["metadata"].setdefault("type", case_type.replace("_", "-"))
-            c["metadata"].setdefault("user_type", user_type)
+            c["metadata"]["type"] = case_type.replace("_", "-")
+            c["metadata"]["user_type"] = _norm(c["metadata"].get("user_type", doc["user_type"]))
             valid.append(c)
         return valid
-
     except Exception as e:
-        print(f"  ⚠️  Error generating {case_type} for {doc_id}: {e}")
+        print(f"  ⚠️  {case_type} for {doc['id']}: {e}")
         return []
 
 
-async def generate_out_of_scope_cases(n: int = 5) -> list[dict]:
-    """Generate questions completely outside XanhSM's domain."""
-    prompt = f"""Tạo {n} câu hỏi hoàn toàn ngoài phạm vi dịch vụ Xanh SM (xe công nghệ).
-Ví dụ: hỏi về nấu ăn, thời tiết, lịch sử, v.v.
-AI phải trả lời "Tôi không có thông tin về vấn đề này" hoặc tương tự.
+# ── Out-of-scope ──────────────────────────────────────────────────────────────
 
-Trả về JSON object với key "cases" chứa array, mỗi phần tử có:
-- question, expected_answer, context, ground_truth_ids (empty list), metadata"""
+OOS_PROMPT = """Tạo {n} câu hỏi hoàn toàn ngoài phạm vi dịch vụ xe công nghệ Xanh SM.
+Chủ đề: nấu ăn, thời tiết, lịch sử, thể thao, chính trị, giải trí, v.v.
+AI phải từ chối và nói không có thông tin.
 
+Trả về JSON object với key "cases", mỗi phần tử có:
+question, expected_answer ("Xin lỗi, tôi chỉ hỗ trợ các câu hỏi liên quan đến dịch vụ Xanh SM."),
+context (""), ground_truth_ids ([]), metadata (difficulty: hard, type: out-of-scope, user_type: nguoi_dung)"""
+
+async def gen_out_of_scope(n: int = 5) -> list[dict]:
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user", "content": OOS_PROMPT.format(n=n)}],
             temperature=0.8,
             response_format={"type": "json_object"},
         )
         parsed = json.loads(resp.choices[0].message.content)
         cases = next((v for v in parsed.values() if isinstance(v, list)), [])
         for c in cases:
-            c.setdefault("context", "")
-            c.setdefault("ground_truth_ids", [])
+            c["context"] = ""
+            c["ground_truth_ids"] = []
             c.setdefault("metadata", {})
-            c["metadata"]["difficulty"] = "hard"
-            c["metadata"]["type"] = "out-of-scope"
-            c["metadata"]["user_type"] = "nguoi_dung"
+            c["metadata"].update({"difficulty": "hard", "type": "out-of-scope", "user_type": "nguoi_dung"})
         return cases
     except Exception as e:
-        print(f"  ⚠️  Error generating out-of-scope cases: {e}")
+        print(f"  ⚠️  out-of-scope: {e}")
         return []
 
 
-async def generate_multi_turn_cases(docs: list[dict], n: int = 5) -> list[dict]:
-    """Generate multi-turn conversation test cases."""
-    import random
-    sample = random.sample(docs, min(n, len(docs)))
-    cases = []
-    for doc in sample:
-        prompt = f"""Từ cặp QA sau, tạo 1 test case multi-turn (hội thoại nhiều lượt):
-Câu hỏi thứ 2 phải phụ thuộc vào câu trả lời thứ 1.
+# ── Multi-turn ────────────────────────────────────────────────────────────────
 
-ID: {doc['id']}
-Câu hỏi gốc: {doc['question']}
-Câu trả lời gốc: {doc['answer'][:400]}
+MULTI_TURN_PROMPT = """Tạo 2 test case multi-turn cho kịch bản: {scenario_name}
 
-Trả về JSON object với key "cases" chứa 1 test case có thêm trường:
-- follow_up_question: câu hỏi tiếp theo
-- follow_up_expected: câu trả lời kỳ vọng cho câu hỏi tiếp theo"""
+Kịch bản chi tiết: {scenario_desc}
 
-        try:
-            resp = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                response_format={"type": "json_object"},
-            )
-            parsed = json.loads(resp.choices[0].message.content)
-            batch = next((v for v in parsed.values() if isinstance(v, list)), [])
-            for c in batch:
-                c.setdefault("context", doc["answer"][:300])
-                c.setdefault("ground_truth_ids", [doc["id"]])
-                c.setdefault("metadata", {})
-                c["metadata"]["difficulty"] = "hard"
-                c["metadata"]["type"] = "multi-turn"
-                c["metadata"]["user_type"] = doc.get("user_type", "nguoi_dung")
-                cases.append(c)
-        except Exception as e:
-            print(f"  ⚠️  Error generating multi-turn for {doc['id']}: {e}")
-    return cases
+Tài liệu nguồn (dùng để grounding câu trả lời cuối):
+{context_text}
+
+YÊU CẦU:
+- turns[1] (assistant lượt 1): PHẢI hỏi lại để làm rõ thông tin còn thiếu
+- turns[3] (assistant lượt 2): câu trả lời PHẢI dựa trên tài liệu nguồn, không bịa số liệu
+- expected_answer = nội dung của turns[1] (câu hỏi lại của bot)
+- Tạo 2 biến thể với câu hỏi ban đầu khác nhau
+
+Trả về JSON object với key "cases", mỗi phần tử có:
+question, expected_answer, context, ground_truth_ids, metadata,
+turns (array 4 phần tử: user/assistant/user/assistant),
+clarification_required (true), clarification_fields (array tên trường cần làm rõ)"""
+
+SCENARIOS = [
+    {
+        "name": "fare_inquiry",
+        "desc": "Người dùng hỏi giá cước đi X km nhưng KHÔNG nêu thành phố và loại dịch vụ. Bot phải hỏi lại: thành phố nào? loại dịch vụ nào (Taxi/Bike/Premium/Luxury)?",
+        "keywords": ["cước", "giá", "km", "phí"],
+        "clarification_fields": ["city", "service_type"],
+        "user_type": "nguoi_dung",
+    },
+    {
+        "name": "salary_inquiry",
+        "desc": "Người dùng hỏi về thu nhập/lương tài xế nhưng KHÔNG nêu rõ bike hay taxi. Bot phải hỏi lại: 'Bạn là tài xế Bike hay Taxi?'",
+        "keywords": ["thu nhập", "lương", "tiền", "tháng"],
+        "clarification_fields": ["driver_type"],
+        "user_type": "tai_xe",
+    },
+    {
+        "name": "driver_registration",
+        "desc": "Người dùng muốn đăng ký làm tài xế nhưng không nêu rõ Bike hay Taxi. Bot hỏi lại để hướng dẫn đúng quy trình.",
+        "keywords": ["đăng ký", "tài xế", "hồ sơ", "giấy tờ"],
+        "clarification_fields": ["driver_type"],
+        "user_type": "tai_xe_moi",
+    },
+    {
+        "name": "accident_support",
+        "desc": "Người dùng báo gặp tai nạn nhưng không rõ là khách hàng hay tài xế. Bot hỏi lại vai trò để cung cấp hướng dẫn phù hợp.",
+        "keywords": ["tai nạn", "sự cố", "va chạm"],
+        "clarification_fields": ["user_role"],
+        "user_type": "nguoi_dung",
+    },
+    {
+        "name": "correction_mid_turn",
+        "desc": "Người dùng hỏi về dịch vụ A, bot trả lời, rồi người dùng đính chính 'ý tôi là dịch vụ B'. Bot phải cập nhật câu trả lời theo đính chính.",
+        "keywords": ["dịch vụ", "đặt xe", "ứng dụng"],
+        "clarification_fields": [],
+        "user_type": "nguoi_dung",
+    },
+]
 
 
-# ── Main orchestrator ─────────────────────────────────────────────────────────
+def _find_docs(docs: list[dict], keywords: list[str], n: int = 3) -> list[dict]:
+    """Find docs where at least one keyword appears. Rank by number of keyword hits."""
+    scored = []
+    for d in docs:
+        text = (d["question"] + " " + d["answer"]).lower()
+        hits = sum(1 for kw in keywords if kw in text)
+        if hits > 0:
+            scored.append((hits, d))
+    scored.sort(key=lambda x: -x[0])
+    results = [d for _, d in scored[:n]]
+    if not results:
+        results = random.sample(docs, min(n, len(docs)))
+    return results
 
-async def main():
-    print("📚 Loading documents from ChromaDB...")
-    collection = get_collection()
-    result = collection.get(include=["metadatas", "documents"])
 
-    ids = result["ids"]
-    metadatas = result["metadatas"]
+async def gen_multi_turn(scenario: dict, docs: list[dict]) -> list[dict]:
+    src_docs = _find_docs(docs, scenario["keywords"], n=3)
+    context_text = "\n\n".join(
+        f"[{d['id']}] Q: {d['question']}\nA: {d['answer'][:400]}"
+        for d in src_docs
+    )
+    ground_truth_ids = [d["id"] for d in src_docs]
 
-    docs = []
-    for doc_id, meta in zip(ids, metadatas):
-        docs.append({
-            "id": doc_id,
-            "question": meta.get("question", ""),
-            "answer": meta.get("answer", ""),
-            "user_type": meta.get("user_type", "nguoi_dung"),
-        })
+    prompt = MULTI_TURN_PROMPT.format(
+        scenario_name=scenario["name"],
+        scenario_desc=scenario["desc"],
+        context_text=context_text,
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user", "content": prompt}],
+            temperature=0.7,
+            response_format={"type": "json_object"},
+        )
+        parsed = json.loads(resp.choices[0].message.content)
+        cases = next((v for v in parsed.values() if isinstance(v, list)), [])
+        if not cases and isinstance(parsed, dict) and parsed.get("question"):
+            cases = [parsed]
 
-    print(f"  ✅ Loaded {len(docs)} documents from ChromaDB")
+        valid = []
+        for c in cases:
+            if not isinstance(c, dict) or not c.get("question"):
+                continue
+            c.setdefault("context", context_text[:300])
+            c["ground_truth_ids"] = ground_truth_ids
+            c.setdefault("metadata", {})
+            c["metadata"].update({
+                "difficulty": "hard",
+                "type": "multi-turn",
+                "scenario": scenario["name"],
+                "user_type": scenario["user_type"],
+            })
+            c.setdefault("turns", [])
+            c["clarification_required"] = len(scenario["clarification_fields"]) > 0
+            c["clarification_fields"] = scenario["clarification_fields"]
+            valid.append(c)
+        return valid
+    except Exception as e:
+        print(f"  ⚠️  multi-turn {scenario['name']}: {e}")
+        return []
 
-    # Select a diverse sample to generate from (spread across user types)
-    import random
-    random.seed(42)
 
-    # Pick ~20 docs spread across user types for generation
+# ── Seed selection ────────────────────────────────────────────────────────────
+
+def select_seeds(docs: list[dict], per_group: int) -> list[dict]:
+    """
+    From all docs, pick the best seeds per user_type group.
+    'Best' = longest answer (most informative), with dedup on question prefix.
+    """
     by_type: dict[str, list] = {}
     for d in docs:
         by_type.setdefault(d["user_type"], []).append(d)
 
-    selected = []
+    seeds = []
     for ut, group in by_type.items():
-        n = min(6, len(group))
-        selected.extend(random.sample(group, n))
+        # Sort by answer length descending — longer = more content to test
+        group_sorted = sorted(group, key=lambda d: len(d["answer"]), reverse=True)
+        # Deduplicate by question prefix to avoid near-identical docs
+        seen_prefix: set[str] = set()
+        picked = []
+        for d in group_sorted:
+            prefix = d["question"][:20]
+            if prefix not in seen_prefix:
+                seen_prefix.add(prefix)
+                picked.append(d)
+            if len(picked) >= per_group:
+                break
+        seeds.extend(picked)
+        print(f"  [{ut}] {len(group)} docs → {len(picked)} seeds")
 
-    print(f"  📋 Selected {len(selected)} source docs for generation")
+    return seeds
+
+
+# ── Dedup ─────────────────────────────────────────────────────────────────────
+
+def dedup(cases: list[dict]) -> list[dict]:
+    seen_exact: set[str] = set()
+    seen_prefix: set[str] = set()
+    out = []
+    for c in cases:
+        q = c.get("question", "").strip()
+        if not q:
+            continue
+        prefix = q[:20]
+        if q in seen_exact or prefix in seen_prefix:
+            continue
+        seen_exact.add(q)
+        seen_prefix.add(prefix)
+        out.append(c)
+    return out
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+async def main():
+    print("📚 Loading ALL documents from ChromaDB...")
+    collection = get_collection()
+    result = collection.get(include=["metadatas", "documents"])
+
+    docs = []
+    for doc_id, meta in zip(result["ids"], result["metadatas"]):
+        q = meta.get("question", "").strip()
+        a = meta.get("answer", "").strip()
+        if not q or not a:
+            continue
+        docs.append({
+            "id": doc_id,
+            "question": q,
+            "answer": a,
+            "user_type": _norm(meta.get("user_type", "nguoi_dung")),
+        })
+
+    print(f"  ✅ {len(docs)} valid documents loaded\n")
+
+    random.seed(42)
+
+    # ── 1. Select seeds ───────────────────────────────────────────────────────
+    print("🌱 Selecting seed documents per user_type group...")
+    seeds = select_seeds(docs, per_group=SEEDS_PER_GROUP)
+    print(f"  → {len(seeds)} total seeds\n")
 
     all_cases: list[dict] = []
 
-    # 1. Fact-check cases (easy/medium) — 2 per doc
-    print("\n🔨 Generating fact-check cases...")
-    tasks = [
-        generate_cases_for_doc(d["id"], d["question"], d["answer"], d["user_type"], "fact_check", n=2)
-        for d in selected
-    ]
-    batches = await asyncio.gather(*tasks)
-    fact_cases = [c for b in batches for c in b]
-    print(f"  ✅ {len(fact_cases)} fact-check cases")
-    all_cases.extend(fact_cases)
+    # ── 2. Fact-check: 2 per seed ─────────────────────────────────────────────
+    print("🔨 Generating fact-check cases (2 per seed)...")
+    fc_tasks = [gen_for_doc(d, "fact_check", n=2) for d in seeds]
+    fc_batches = await asyncio.gather(*fc_tasks)
+    fc_cases = [c for b in fc_batches for c in b]
+    print(f"  ✅ {len(fc_cases)} fact-check cases")
+    all_cases.extend(fc_cases)
 
-    # 2. Adversarial cases — 1 per doc (subset)
-    print("\n⚔️  Generating adversarial cases...")
-    adv_docs = random.sample(selected, min(10, len(selected)))
-    tasks = [
-        generate_cases_for_doc(d["id"], d["question"], d["answer"], d["user_type"], "adversarial", n=1)
-        for d in adv_docs
-    ]
-    batches = await asyncio.gather(*tasks)
-    adv_cases = [c for b in batches for c in b]
+    # ── 3. Adversarial: 1 per seed ────────────────────────────────────────────
+    print("\n⚔️  Generating adversarial cases (1 per seed)...")
+    adv_tasks = [gen_for_doc(d, "adversarial", n=1) for d in seeds]
+    adv_batches = await asyncio.gather(*adv_tasks)
+    adv_cases = [c for b in adv_batches for c in b]
     print(f"  ✅ {len(adv_cases)} adversarial cases")
     all_cases.extend(adv_cases)
 
-    # 3. Edge cases — 1 per doc (subset)
-    print("\n🔬 Generating edge cases...")
-    edge_docs = random.sample(selected, min(10, len(selected)))
-    tasks = [
-        generate_cases_for_doc(d["id"], d["question"], d["answer"], d["user_type"], "edge_case", n=1)
-        for d in edge_docs
-    ]
-    batches = await asyncio.gather(*tasks)
-    edge_cases = [c for b in batches for c in b]
-    print(f"  ✅ {len(edge_cases)} edge cases")
-    all_cases.extend(edge_cases)
+    # ── 4. Edge-case: 1 per seed ──────────────────────────────────────────────
+    print("\n🔬 Generating edge cases (1 per seed)...")
+    ec_tasks = [gen_for_doc(d, "edge_case", n=1) for d in seeds]
+    ec_batches = await asyncio.gather(*ec_tasks)
+    ec_cases = [c for b in ec_batches for c in b]
+    print(f"  ✅ {len(ec_cases)} edge cases")
+    all_cases.extend(ec_cases)
 
-    # 4. Out-of-scope cases
+    # ── 5. Out-of-scope ───────────────────────────────────────────────────────
     print("\n🚫 Generating out-of-scope cases...")
-    oos_cases = await generate_out_of_scope_cases(n=5)
-    print(f"  ✅ {len(oos_cases)} out-of-scope cases")
-    all_cases.extend(oos_cases)
+    oos = await gen_out_of_scope(n=8)
+    print(f"  ✅ {len(oos)} out-of-scope cases")
+    all_cases.extend(oos)
 
-    # 5. Multi-turn cases
-    print("\n💬 Generating multi-turn cases...")
-    mt_cases = await generate_multi_turn_cases(docs, n=5)
+    # ── 6. Multi-turn ─────────────────────────────────────────────────────────
+    print("\n💬 Generating multi-turn cases (2 variants × 5 scenarios)...")
+    mt_tasks = [gen_multi_turn(s, docs) for s in SCENARIOS]
+    mt_batches = await asyncio.gather(*mt_tasks)
+    mt_cases = [c for b in mt_batches for c in b]
     print(f"  ✅ {len(mt_cases)} multi-turn cases")
+    for s in SCENARIOS:
+        ids = [d["id"] for d in _find_docs(docs, s["keywords"], n=3)]
+        print(f"     {s['name']}: grounded on {ids}")
     all_cases.extend(mt_cases)
 
-    print(f"\n📊 Total generated: {len(all_cases)} cases")
+    # ── 7. Dedup & validate ───────────────────────────────────────────────────
+    print(f"\n📊 Total before dedup: {len(all_cases)}")
+    unique = dedup(all_cases)
+    print(f"📊 After dedup: {len(unique)}")
 
-    # Deduplicate by question text
-    seen_q: set[str] = set()
-    unique_cases = []
-    for c in all_cases:
-        q = c.get("question", "").strip()
-        if q and q not in seen_q:
-            seen_q.add(q)
-            unique_cases.append(c)
+    # ── 8. Top-up to 80 if needed ─────────────────────────────────────────────
+    if len(unique) < 80:
+        print(f"⚠️  {len(unique)} cases — topping up with more fact-check...")
+        remaining = [d for d in docs if d not in seeds]
+        random.shuffle(remaining)
+        extra_seeds = remaining[:20]
+        extra_tasks = [gen_for_doc(d, "fact_check", n=2) for d in extra_seeds]
+        extra_batches = await asyncio.gather(*extra_tasks)
+        extra = [c for b in extra_batches for c in b]
+        unique = dedup(unique + extra)
+        print(f"  ✅ Now {len(unique)} cases")
 
-    print(f"📊 After dedup: {len(unique_cases)} unique cases")
+    # ── 9. Save ───────────────────────────────────────────────────────────────
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_set.jsonl")
+    with open(out_path, "w", encoding="utf-8") as f:
+        for c in unique:
+            f.write(json.dumps(c, ensure_ascii=False) + "\n")
 
-    # Ensure at least 50
-    if len(unique_cases) < 50:
-        print(f"⚠️  Only {len(unique_cases)} cases — generating more fact-check cases...")
-        extra_docs = random.sample(docs, min(20, len(docs)))
-        tasks = [
-            generate_cases_for_doc(d["id"], d["question"], d["answer"], d["user_type"], "fact_check", n=2)
-            for d in extra_docs
-        ]
-        batches = await asyncio.gather(*tasks)
-        for c in [c for b in batches for c in b]:
-            q = c.get("question", "").strip()
-            if q and q not in seen_q:
-                seen_q.add(q)
-                unique_cases.append(c)
-        print(f"  ✅ Now {len(unique_cases)} cases")
+    print(f"\n✅ Saved {len(unique)} cases → data/golden_set.jsonl")
 
-    # Save
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_set.jsonl")
-    with open(output_path, "w", encoding="utf-8") as f:
-        for case in unique_cases:
-            f.write(json.dumps(case, ensure_ascii=False) + "\n")
-
-    print(f"\n✅ Saved {len(unique_cases)} test cases to data/golden_set.jsonl")
-
-    # Summary breakdown
-    by_type_count: dict[str, int] = {}
+    # ── 10. Summary ───────────────────────────────────────────────────────────
+    by_type: dict[str, int] = {}
     by_diff: dict[str, int] = {}
-    for c in unique_cases:
-        t = c.get("metadata", {}).get("type", "unknown")
-        d = c.get("metadata", {}).get("difficulty", "unknown")
-        by_type_count[t] = by_type_count.get(t, 0) + 1
-        by_diff[d] = by_diff.get(d, 0) + 1
+    by_ut: dict[str, int] = {}
+    by_scenario: dict[str, int] = {}
+    for c in unique:
+        m = c.get("metadata", {})
+        by_type[m.get("type", "?")] = by_type.get(m.get("type", "?"), 0) + 1
+        by_diff[m.get("difficulty", "?")] = by_diff.get(m.get("difficulty", "?"), 0) + 1
+        by_ut[m.get("user_type", "?")] = by_ut.get(m.get("user_type", "?"), 0) + 1
+        if m.get("scenario"):
+            by_scenario[m["scenario"]] = by_scenario.get(m["scenario"], 0) + 1
 
-    print("\n📈 Breakdown by type:")
-    for t, cnt in sorted(by_type_count.items()):
-        print(f"  {t}: {cnt}")
-    print("\n📈 Breakdown by difficulty:")
-    for d, cnt in sorted(by_diff.items()):
-        print(f"  {d}: {cnt}")
+    print("\n📈 By type:       ", dict(sorted(by_type.items())))
+    print("📈 By difficulty: ", dict(sorted(by_diff.items())))
+    print("📈 By user_type:  ", dict(sorted(by_ut.items())))
+    if by_scenario:
+        print("📈 MT scenarios:  ", dict(sorted(by_scenario.items())))
 
 
 if __name__ == "__main__":
