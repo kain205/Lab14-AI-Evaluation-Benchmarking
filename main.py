@@ -12,7 +12,7 @@ from agent.main_agent import AgentV1, AgentV2, AgentV3
 load_dotenv()
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
-MAX_CASES = 5  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+MAX_CASES = 30  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -94,9 +94,12 @@ async def run_benchmark(version, agent=None):
 
 
 async def main():
-    v1_results, v1_summary = await run_benchmark_with_results("Agent_V1_Base", AgentV1())
-    v2_results, v2_summary = await run_benchmark_with_results("Agent_V2_Rewrite", AgentV2())
-    v3_results, v3_summary = await run_benchmark_with_results("Agent_V3_Clarify", AgentV3())
+    (v1_results, v1_summary), (v2_results, v2_summary), (v3_results, v3_summary) = \
+        await asyncio.gather(
+            run_benchmark_with_results("Agent_V1_Base",    AgentV1()),
+            run_benchmark_with_results("Agent_V2_Rewrite", AgentV2()),
+            run_benchmark_with_results("Agent_V3_Clarify", AgentV3()),
+        )
 
     if not v1_summary or not v3_summary:
         print("❌ Không thể chạy Benchmark. Kiểm tra lại data/golden_set.jsonl.")
