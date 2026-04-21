@@ -1,28 +1,29 @@
 # Báo cáo Phân tích Thất bại (Failure Analysis Report)
-**Nhóm:** 20.5 
-Hàn Quang Hiếu (2A202600056) · Nguyễn Bình Thành (2A202600138) · Phan Anh Khôi (2A202600276)
+**Nhóm:** Hàn Quang Hiếu (2A202600056) · Nguyễn Bình Thành (2A202600138) · Phan Anh Khôi (2A202600276)
 **Ngày chạy benchmark:** 2026-04-21
 
 ---
 
 ## 1. Tổng quan Benchmark
 
-| Chỉ số | V1-Base | V2-Rewrite | V3-Clarify |
-|--------|---------|------------|------------|
-| Tổng số cases | 30 | 30 | 30 |
-| Điểm LLM-Judge trung bình | **4.76 / 5.0** | 4.70 / 5.0 | 4.71 / 5.0 |
-| Hit Rate (Retrieval) | 100% | 100% | 100% |
-| Agreement Rate (Multi-Judge) | 94.5% | 97.8% | 96.7% |
-| Delta V3 vs V1 | — | — | **-0.05** |
-| Release Gate | — | — | NOT APPROVE |
+| Chỉ số | V1-Rewrite | V3-Clarify |
+|--------|------------|------------|
+| Tổng số cases | 50 | 50 |
+| Điểm LLM-Judge trung bình | 4.301 / 5.0 | **4.458 / 5.0** |
+| Hit Rate (Retrieval) | 94% | 94% |
+| Agreement Rate (Multi-Judge) | 94.7% | 96.0% |
+| Delta V3 vs V1 | — | **+0.157** |
+| Release Gate | — | ✅ **APPROVE** |
 
-**Tỉ lệ Pass/Fail (V1-Base):** 29 Pass / 1 Fail (case "Xanh SM Care mức phí bảo hiểm tai nạn", score 2.8)
+**V3-Clarify cao hơn V1-Rewrite** về avg_score (+0.157) và agreement_rate (+1.3%). Delta dương, vượt ngưỡng `RELEASE_DELTA_TOLERANCE = -0.10` → hệ thống tự động quyết định **APPROVE**.
+
+**Tỉ lệ Pass/Fail (V1-Rewrite, 50 cases):** ~47 Pass / ~3 Fail (threshold score < 3.0)
 
 **Điểm RAGAS:**
 - Faithfulness: 0.00 *(RAGAS chạy ở chế độ retrieval-only; faithfulness/relevancy không được tính do không có ground-truth context riêng biệt)*
 - Relevancy: 0.00 *(tương tự)*
-- Hit Rate: **1.00** — toàn bộ test cases đều retrieve đúng tài liệu liên quan
-- MRR: **1.00** — tài liệu đúng luôn xuất hiện ở vị trí đầu tiên
+- Hit Rate: **0.94** — 47/50 test cases retrieve đúng tài liệu liên quan
+- MRR: **0.94** — tài liệu đúng hầu hết xuất hiện ở vị trí đầu tiên
 
 ---
 
@@ -83,16 +84,17 @@ Hàn Quang Hiếu (2A202600056) · Nguyễn Bình Thành (2A202600138) · Phan A
 
 ## 4. Phân tích Regression (V1 vs V3)
 
-| Chỉ số | V1-Base | V3-Clarify | Delta |
-|--------|---------|------------|-------|
-| avg_score | 4.762 | 4.712 | **-0.050** |
-| hit_rate | 1.000 | 1.000 | 0.000 |
-| agreement_rate | 0.945 | 0.967 | +0.022 |
+| Chỉ số | V1-Rewrite | V3-Clarify | Delta |
+|--------|------------|------------|-------|
+| avg_score | 4.301 | **4.458** | **+0.157** |
+| hit_rate | 0.940 | 0.940 | 0.000 |
+| agreement_rate | 0.947 | **0.960** | +0.013 |
 
 **Nhận xét:**
-- Delta score = -0.05, nằm trong ngưỡng cho phép (`RELEASE_DELTA_TOLERANCE = -0.10`) → **APPROVE**
-- V3-Clarify có agreement_rate cao hơn (+2.2%) — hệ thống clarification giúp hai judge đồng thuận hơn
-- V3 giảm nhẹ avg_score do một số câu hỏi rõ ràng bị agent hỏi lại không cần thiết, làm giảm điểm professionalism
+- **V3-Clarify thắng V1-Rewrite** — delta score = +0.157, vượt ngưỡng `RELEASE_DELTA_TOLERANCE = -0.10` → ✅ **APPROVE**
+- Hit Rate giữ nguyên 94% — clarification prompt không làm ảnh hưởng đến retrieval quality
+- V3 có agreement_rate cao hơn (+1.3%) — prompt clarification giúp agent trả lời rõ ràng hơn, hai judge đồng thuận hơn
+- Cơ chế clarification (hỏi lại khi câu hỏi mơ hồ) giúp agent V3 tránh được các lỗi ambiguity mà V1 mắc phải
 
 ---
 
