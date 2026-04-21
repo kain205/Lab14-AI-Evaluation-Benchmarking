@@ -12,7 +12,7 @@ from agent.main_agent import AgentV1, AgentV2, AgentV3
 load_dotenv()
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
-MAX_CASES = 20  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+MAX_CASES = 10  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -28,24 +28,25 @@ class ExpertEvaluator:
 
     async def score(self, case, resp):
         ground_truth_ids = case.get("ground_truth_ids", [])
+        if case.get("follow_up_question") and case.get("follow_up_ground_truth_ids"):
+            ground_truth_ids = case.get("follow_up_ground_truth_ids", ground_truth_ids)
         retrieved_ids = resp.get("retrieved_ids", [])
+        hit_rate = self._eval.calculate_hit_rate(ground_truth_ids, retrieved_ids)
+        mrr = self._eval.calculate_mrr(ground_truth_ids, retrieved_ids)
         return {
+            "hit_rate": hit_rate,
+            "mrr": mrr,
             "faithfulness": 0.0,
             "relevancy": 0.0,
             "retrieval": {
-                "hit_rate": self._eval.calculate_hit_rate(ground_truth_ids, retrieved_ids),
-                "mrr": self._eval.calculate_mrr(ground_truth_ids, retrieved_ids),
+                "hit_rate": hit_rate,
+                "mrr": mrr,
             },
         }
 
 class MultiModelJudge:
     """Wrapper giữ tên gốc từ template, delegate sang LLMJudge thật."""
 
-            def _shorten_text(text: str, limit: int = 220) -> str:
-                normalized = " ".join(str(text).split())
-                if len(normalized) <= limit:
-                    return normalized
-                return normalized[: limit - 3].rstrip() + "..."
     def __init__(self):
         self._judge = LLMJudge(openai_api_key=OPENAI_API_KEY)
 
@@ -87,11 +88,18 @@ async def run_benchmark_with_results(agent_version: str, agent=None):
         r["agent_version"] = agent_version
 
     total = len(results)
+
+    def _extract_hit_rate(row: dict) -> float:
+        ragas = row.get("ragas", {})
+        if "hit_rate" in ragas:
+            return float(ragas.get("hit_rate", 0.0))
+        return float(ragas.get("retrieval", {}).get("hit_rate", 0.0))
+
     summary = {
         "metadata": {"version": agent_version, "total": total, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
         "metrics": {
             "avg_score": sum(r["judge"]["final_score"] for r in results) / total,
-            "hit_rate": sum(r["ragas"]["retrieval"]["hit_rate"] for r in results) / total,
+            "hit_rate": sum(_extract_hit_rate(r) for r in results) / total,
             "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total,
         }
     }
@@ -203,6 +211,9 @@ async def main():
     os.makedirs("reports", exist_ok=True)
     comparison = {
         "summaries": {
+            "v1": v1_summary,
+            "v2": v2_summary,
+            "v3": v3_summary,
             "V1-Base":    v1_summary,
             "V2-Rewrite": v2_summary,
             "V3-Clarify": v3_summary,
@@ -213,7 +224,14 @@ async def main():
         json.dump(comparison, f, ensure_ascii=False, indent=2)
     with open("reports/benchmark_results.json", "w", encoding="utf-8") as f:
         json.dump(
-            {"V1-Base": v1_results, "V2-Rewrite": v2_results, "V3-Clarify": v3_results},
+            {
+                "v1": v1_results,
+                "v2": v2_results,
+                "v3": v3_results,
+                "V1-Base": v1_results,
+                "V2-Rewrite": v2_results,
+                "V3-Clarify": v3_results,
+            },
             f, ensure_ascii=False, indent=2,
         )
 

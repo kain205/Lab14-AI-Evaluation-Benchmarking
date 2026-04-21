@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Dict, Any
 from openai import AsyncOpenAI
@@ -7,6 +8,8 @@ import asyncio
 class LLMJudge:
     def __init__(self, openai_api_key: str, gemini_api_key: str = ""):
         self.llm = AsyncOpenAI(api_key=openai_api_key)
+        self.model_a = "gpt-4o-mini"
+        self.model_b = "gpt-4o"
 
         self.rubrics = {
             "accuracy": """Chấm điểm độ chính xác của câu trả lời FAQ từ 1-5:
@@ -38,60 +41,149 @@ Câu hỏi của khách hàng: {question}
 Ground Truth: {ground_truth}
 Câu trả lời cần đánh giá: {answer}
 
-Chỉ trả về một số nguyên từ 1 đến 5."""
+Chỉ trả về JSON hợp lệ theo đúng format sau:
+{{"score": <số nguyên từ 1 đến 5>, "reasoning": "giải thích ngắn gọn"}}
+Không thêm bất kỳ trường nào khác."""
+
+    @staticmethod
+    def _shorten_text(text: str, limit: int = 220) -> str:
+        normalized = " ".join(str(text or "").split())
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 3].rstrip() + "..."
+
+    @staticmethod
+    def _clamp_score(value: int) -> int:
+        return min(5, max(0, int(value)))
 
     def _parse_score(self, text: str) -> int:
-        match = re.search(r"[1-5]", text.strip())
-        return int(match.group()) if match else 1
+        content = (text or "").strip()
+        if not content:
+            return 1
 
-    async def _call_model(self, prompt: str, model: str) -> int:
+        # Preferred path: strict JSON payload {"score": 1..5}
+        try:
+            payload = json.loads(content)
+            if isinstance(payload, dict) and "score" in payload:
+                value = int(payload["score"])
+                return min(5, max(1, value))
+        except Exception:
+            pass
+
+        # Fallback for occasional non-JSON model outputs.
+        match = re.search(r"\b([1-5])\b", content)
+        return int(match.group(1)) if match else 1
+
+    def _parse_judge_payload(self, text: str) -> Dict[str, Any]:
+        content = (text or "").strip()
+        if not content:
+            return {
+                "score": 1,
+                "reasoning": "Không nhận được nội dung đánh giá từ model.",
+            }
+
+        try:
+            payload = json.loads(content)
+            if isinstance(payload, dict):
+                score = self._clamp_score(payload.get("score", 1))
+                reasoning = self._shorten_text(payload.get("reasoning", ""))
+                return {
+                    "score": score,
+                    "reasoning": reasoning or "Không có giải thích chi tiết.",
+                }
+        except Exception:
+            pass
+
+        return {
+            "score": self._parse_score(content),
+            "reasoning": self._shorten_text(content),
+        }
+
+    async def _call_model(self, prompt: str, model: str) -> Dict[str, Any]:
         for attempt in range(3):
             try:
                 response = await self.llm.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=10,
+                    response_format={"type": "json_object"},
+                    max_tokens=140,
                     temperature=0,
                 )
-                return self._parse_score(response.choices[0].message.content)
+                return self._parse_judge_payload(response.choices[0].message.content)
             except Exception as e:
                 if "429" in str(e) and attempt < 2:
                     await asyncio.sleep(2 ** attempt * 5)
                 else:
-                    raise
+                    return {
+                        "score": 0,
+                        "reasoning": self._shorten_text(f"Error OpenAI ({model}): {e}", 360),
+                    }
+
+        return {
+            "score": 0,
+            "reasoning": f"Error OpenAI ({model}): retry exhausted",
+        }
 
     async def evaluate_multi_judge(self, question: str, answer: str, ground_truth: str) -> Dict[str, Any]:
         criteria = list(self.rubrics.keys())
 
-        # Judge A: gpt-4o-mini  |  Judge B: gpt-4o
-        tasks_a = [self._call_model(self._build_prompt(c, question, answer, ground_truth), "gpt-4o-mini") for c in criteria]
-        tasks_b = [self._call_model(self._build_prompt(c, question, answer, ground_truth), "gpt-4o") for c in criteria]
-        scores_a_list, scores_b_list = await asyncio.gather(
+        tasks_a = [self._call_model(self._build_prompt(c, question, answer, ground_truth), self.model_a) for c in criteria]
+        tasks_b = [self._call_model(self._build_prompt(c, question, answer, ground_truth), self.model_b) for c in criteria]
+        results_a_list, results_b_list = await asyncio.gather(
             asyncio.gather(*tasks_a),
             asyncio.gather(*tasks_b),
         )
 
-        scores_a = dict(zip(criteria, scores_a_list))
-        scores_b = dict(zip(criteria, scores_b_list))
+        scores_a = {c: int(r["score"]) for c, r in zip(criteria, results_a_list)}
+        scores_b = {c: int(r["score"]) for c, r in zip(criteria, results_b_list)}
+        reasons_a = {c: r["reasoning"] for c, r in zip(criteria, results_a_list)}
+        reasons_b = {c: r["reasoning"] for c, r in zip(criteria, results_b_list)}
 
         discrepancies = {c: abs(scores_a[c] - scores_b[c]) for c in criteria}
         final_scores = {
-            c: (scores_a[c] + scores_b[c]) / 2 if discrepancies[c] > 1 else scores_a[c]
+            c: round((scores_a[c] + scores_b[c]) / 2, 2)
             for c in criteria
         }
 
         avg_final = sum(final_scores.values()) / len(final_scores)
         agreement_rate = sum(1 for d in discrepancies.values() if d <= 1) / len(criteria)
 
+        avg_a = round(sum(scores_a.values()) / len(criteria), 2)
+        avg_b = round(sum(scores_b.values()) / len(criteria), 2)
+
+        if avg_a == 0 and avg_b == 0:
+            consensus_type = "none"
+        elif avg_a == 0 or avg_b == 0:
+            consensus_type = "partial"
+        else:
+            consensus_type = "full"
+
+        model_a_reasoning = " | ".join(f"{c}: {reasons_a[c]}" for c in criteria)
+        model_b_reasoning = " | ".join(f"{c}: {reasons_b[c]}" for c in criteria)
+
         return {
             "final_score": round(avg_final, 2),
             "agreement_rate": round(agreement_rate, 2),
             "per_criterion": final_scores,
             "discrepancies": discrepancies,
-            "individual_scores": {
-                "gpt-4o-mini": scores_a,
-                "gpt-4o": scores_b,
+            "individual_results": {
+                self.model_a: {
+                    "score": avg_a,
+                    "reasoning": self._shorten_text(model_a_reasoning, 500),
+                    "per_criterion": scores_a,
+                },
+                self.model_b: {
+                    "score": avg_b,
+                    "reasoning": self._shorten_text(model_b_reasoning, 500),
+                    "per_criterion": scores_b,
+                },
             },
+            "individual_scores": {
+                self.model_a: scores_a,
+                self.model_b: scores_b,
+            },
+            "status": "consensus",
+            "consensus_type": consensus_type,
         }
 
     async def check_position_bias(self, response_a: str, response_b: str):
