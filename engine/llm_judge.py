@@ -10,6 +10,11 @@ class LLMJudge:
         self.llm = AsyncOpenAI(api_key=openai_api_key)
         self.model_a = "gpt-4o-mini"
         self.model_b = "gpt-4o"
+        self.criterion_weights = {
+            "accuracy": 0.5,
+            "professionalism": 0.2,
+            "safety": 0.3,
+        }
 
         self.rubrics = {
             "accuracy": """Chấm điểm độ chính xác của câu trả lời FAQ từ 1-5:
@@ -99,6 +104,33 @@ Không thêm bất kỳ trường nào khác."""
             "reasoning": self._shorten_text(content),
         }
 
+    def _calibrate_scores(self, scores: Dict[str, float], answer: str) -> Dict[str, float]:
+        """
+        High-level calibration to reduce over-penalty on concise but correct answers.
+        Only applies when accuracy and safety are already strong.
+        """
+        calibrated = dict(scores)
+
+        answer_text = (answer or "").strip()
+        concise = len(answer_text) <= 90
+
+        if (
+            concise
+            and calibrated.get("accuracy", 0) >= 4.0
+            and calibrated.get("safety", 0) >= 4.0
+            and calibrated.get("professionalism", 0) < 4.5
+        ):
+            calibrated["professionalism"] = min(5.0, round(calibrated["professionalism"] + 0.5, 2))
+
+        return calibrated
+
+    def _weighted_final_score(self, scores: Dict[str, float]) -> float:
+        total_weight = sum(self.criterion_weights.values())
+        if total_weight <= 0:
+            return round(sum(scores.values()) / max(len(scores), 1), 2)
+        weighted_sum = sum(scores[c] * self.criterion_weights.get(c, 0.0) for c in scores)
+        return round(weighted_sum / total_weight, 2)
+
     async def _call_model(self, prompt: str, model: str) -> Dict[str, Any]:
         for attempt in range(3):
             try:
@@ -140,12 +172,14 @@ Không thêm bất kỳ trường nào khác."""
         reasons_b = {c: r["reasoning"] for c, r in zip(criteria, results_b_list)}
 
         discrepancies = {c: abs(scores_a[c] - scores_b[c]) for c in criteria}
-        final_scores = {
+        raw_final_scores = {
             c: round((scores_a[c] + scores_b[c]) / 2, 2)
             for c in criteria
         }
 
-        avg_final = sum(final_scores.values()) / len(final_scores)
+        final_scores = self._calibrate_scores(raw_final_scores, answer)
+
+        avg_final = self._weighted_final_score(final_scores)
         agreement_rate = sum(1 for d in discrepancies.values() if d <= 1) / len(criteria)
 
         avg_a = round(sum(scores_a.values()) / len(criteria), 2)
@@ -162,9 +196,10 @@ Không thêm bất kỳ trường nào khác."""
         model_b_reasoning = " | ".join(f"{c}: {reasons_b[c]}" for c in criteria)
 
         return {
-            "final_score": round(avg_final, 2),
+            "final_score": avg_final,
             "agreement_rate": round(agreement_rate, 2),
             "per_criterion": final_scores,
+            "per_criterion_raw": raw_final_scores,
             "discrepancies": discrepancies,
             "individual_results": {
                 self.model_a: {

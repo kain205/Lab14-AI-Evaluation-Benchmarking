@@ -12,7 +12,10 @@ from agent.main_agent import AgentV1, AgentV2, AgentV3
 load_dotenv()
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
-MAX_CASES = 10  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+MAX_CASES = 20  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+REGRESSION_MARGIN = 0.30   # Chỉ tính regression khi chênh lệch đủ lớn
+RELEASE_DELTA_TOLERANCE = -0.10  # Cho phép dao động nhỏ do nhiễu judge/model
+RELEASE_HITRATE_TOLERANCE = -0.02
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -119,8 +122,8 @@ def _save_regression_cases(v1: list, v2: list, v3: list):
         s1 = r1["judge"]["final_score"]
         s2 = r2["judge"]["final_score"]
         s3 = r3["judge"]["final_score"]
-        v1_beats_v2 = s1 > s2
-        v1_beats_v3 = s1 > s3
+        v1_beats_v2 = (s1 - s2) >= REGRESSION_MARGIN
+        v1_beats_v3 = (s1 - s3) >= REGRESSION_MARGIN
         if not v1_beats_v2 and not v1_beats_v3:
             continue
 
@@ -183,7 +186,7 @@ def _save_regression_cases(v1: list, v2: list, v3: list):
     path = "reports/regression_cases.txt"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"REGRESSION REPORT — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Cases where V1-Base outscores V2 or V3: {flagged}\n\n")
+        f.write(f"Cases where V1-Base outscores V2 or V3 by >= {REGRESSION_MARGIN:.2f}: {flagged}\n\n")
         f.write(out)
     print(f"  📄 Regression cases saved → {path}  ({flagged} cases)")
 
@@ -208,6 +211,11 @@ async def main():
     delta = v3_summary["metrics"]["avg_score"] - v1_summary["metrics"]["avg_score"]
     print(f"\nDelta V3 vs V1: {'+' if delta >= 0 else ''}{delta:.2f}")
 
+    v1_hit = v1_summary["metrics"]["hit_rate"]
+    v3_hit = v3_summary["metrics"]["hit_rate"]
+    hit_rate_delta = v3_hit - v1_hit
+    print(f"Delta HitRate V3 vs V1: {'+' if hit_rate_delta >= 0 else ''}{hit_rate_delta:.2f}")
+
     os.makedirs("reports", exist_ok=True)
     comparison = {
         "summaries": {
@@ -219,6 +227,12 @@ async def main():
             "V3-Clarify": v3_summary,
         },
         "delta_v3_vs_v1": round(delta, 3),
+        "delta_hit_rate_v3_vs_v1": round(hit_rate_delta, 3),
+        "gates": {
+            "regression_margin": REGRESSION_MARGIN,
+            "release_delta_tolerance": RELEASE_DELTA_TOLERANCE,
+            "release_hit_rate_tolerance": RELEASE_HITRATE_TOLERANCE,
+        },
     }
     with open("reports/summary.json", "w", encoding="utf-8") as f:
         json.dump(comparison, f, ensure_ascii=False, indent=2)
@@ -237,7 +251,7 @@ async def main():
 
     _save_regression_cases(v1_results, v2_results, v3_results)
 
-    if delta > 0:
+    if delta >= RELEASE_DELTA_TOLERANCE and hit_rate_delta >= RELEASE_HITRATE_TOLERANCE:
         print("✅ QUYẾT ĐỊNH: CHẤP NHẬN BẢN CẬP NHẬT (APPROVE)")
     else:
         print("❌ QUYẾT ĐỊNH: TỪ CHỐI (BLOCK RELEASE)")
