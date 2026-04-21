@@ -7,12 +7,12 @@ from dotenv import load_dotenv
 from engine.runner import BenchmarkRunner
 from engine.llm_judge import LLMJudge
 from engine.retrieval_eval import RetrievalEvaluator as _RetEval
-from agent.main_agent import AgentV1, AgentV2, AgentV3
+from agent.main_agent import AgentV1, AgentV3
 
 load_dotenv()
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
-MAX_CASES = 20  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
+MAX_CASES = 50  # Giới hạn số test cases mỗi lần chạy (None = chạy hết)
 REGRESSION_MARGIN = 0.30   # Chỉ tính regression khi chênh lệch đủ lớn
 RELEASE_DELTA_TOLERANCE = -0.10  # Cho phép dao động nhỏ do nhiễu judge/model
 RELEASE_HITRATE_TOLERANCE = -0.02
@@ -113,29 +113,22 @@ async def run_benchmark(version, agent=None):
     return summary
 
 
-def _save_regression_cases(v1: list, v2: list, v3: list):
-    """Write cases where V1 beats V2 or V3, side by side, to reports/regression_cases.txt."""
+def _save_regression_cases(v1: list, v3: list):
+    """Write cases where V1 beats V3, side by side, to reports/regression_cases.txt."""
     lines = []
     flagged = 0
 
-    for r1, r2, r3 in zip(v1, v2, v3):
+    for r1, r3 in zip(v1, v3):
         s1 = r1["judge"]["final_score"]
-        s2 = r2["judge"]["final_score"]
         s3 = r3["judge"]["final_score"]
-        v1_beats_v2 = (s1 - s2) >= REGRESSION_MARGIN
         v1_beats_v3 = (s1 - s3) >= REGRESSION_MARGIN
-        if not v1_beats_v2 and not v1_beats_v3:
+        if not v1_beats_v3:
             continue
 
         flagged += 1
         sep = "=" * 80
         lines.append(sep)
-        label = []
-        if v1_beats_v2:
-            label.append(f"V1({s1:.2f}) > V2({s2:.2f})")
-        if v1_beats_v3:
-            label.append(f"V1({s1:.2f}) > V3({s3:.2f})")
-        lines.append(f"CASE #{flagged}  |  {' , '.join(label)}")
+        lines.append(f"CASE #{flagged}  |  V1({s1:.2f}) > V3({s3:.2f})")
         lines.append(f"Type: {r1.get('test_case', '')[:120]}")
         lines.append("")
 
@@ -143,8 +136,8 @@ def _save_regression_cases(v1: list, v2: list, v3: list):
         lines.append(f"QUESTION: {q}")
         lines.append("")
 
-        lines.append(f"{'V1-Base':^26} | {'V2-Rewrite':^26} | {'V3-Clarify':^26}")
-        lines.append(f"{'score: ' + str(s1):^26} | {'score: ' + str(s2):^26} | {'score: ' + str(s3):^26}")
+        lines.append(f"{'V1':^39} | {'V3-Clarify':^39}")
+        lines.append(f"{'score: ' + str(s1):^39} | {'score: ' + str(s3):^39}")
         lines.append("-" * 80)
 
         # Print answers wrapped at ~78 chars per column — simple line-by-line approach
@@ -161,41 +154,37 @@ def _save_regression_cases(v1: list, v2: list, v3: list):
             return result or [""]
 
         a1 = wrap(r1.get("agent_response", ""))
-        a2 = wrap(r2.get("agent_response", ""))
         a3 = wrap(r3.get("agent_response", ""))
-        rows = max(len(a1), len(a2), len(a3))
+        rows = max(len(a1), len(a3))
         a1 += [""] * (rows - len(a1))
-        a2 += [""] * (rows - len(a2))
         a3 += [""] * (rows - len(a3))
-        for l1, l2, l3 in zip(a1, a2, a3):
-            lines.append(f"{l1:<26} | {l2:<26} | {l3:<26}")
+        for l1, l3 in zip(a1, a3):
+            lines.append(f"{l1:<39} | {l3:<39}")
 
         lines.append("")
         # Per-criterion scores
         pc1 = r1["judge"].get("per_criterion", {})
-        pc2 = r2["judge"].get("per_criterion", {})
         pc3 = r3["judge"].get("per_criterion", {})
         for crit in pc1:
-            lines.append(f"  {crit:<16} V1={pc1.get(crit,'?'):.1f}  V2={pc2.get(crit,'?'):.1f}  V3={pc3.get(crit,'?'):.1f}")
+            lines.append(f"  {crit:<16} V1={pc1.get(crit,'?'):.1f}  V3={pc3.get(crit,'?'):.1f}")
         lines.append("")
 
     if flagged == 0:
-        lines.append("No regression cases found (V1 did not beat V2 or V3 on any case).")
+        lines.append("No regression cases found (V1 did not beat V3 on any case).")
 
     out = "\n".join(lines)
     path = "reports/regression_cases.txt"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"REGRESSION REPORT — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Cases where V1-Base outscores V2 or V3 by >= {REGRESSION_MARGIN:.2f}: {flagged}\n\n")
+        f.write(f"Cases where V1 outscores V3 by >= {REGRESSION_MARGIN:.2f}: {flagged}\n\n")
         f.write(out)
     print(f"  📄 Regression cases saved → {path}  ({flagged} cases)")
 
 
 async def main():
-    (v1_results, v1_summary), (v2_results, v2_summary), (v3_results, v3_summary) = \
+    (v1_results, v1_summary), (v3_results, v3_summary) = \
         await asyncio.gather(
-            run_benchmark_with_results("Agent_V1_Base",    AgentV1()),
-            run_benchmark_with_results("Agent_V2_Rewrite", AgentV2()),
+            run_benchmark_with_results("Agent_V1_Rewrite", AgentV1()),
             run_benchmark_with_results("Agent_V3_Clarify", AgentV3()),
         )
 
@@ -204,7 +193,7 @@ async def main():
         return
 
     print("\n📊 --- KẾT QUẢ SO SÁNH (REGRESSION) ---")
-    for label, s in [("V1-Base", v1_summary), ("V2-Rewrite", v2_summary), ("V3-Clarify", v3_summary)]:
+    for label, s in [("V1-Rewrite", v1_summary), ("V3-Clarify", v3_summary)]:
         if s:
             print(f"  {label}: score={s['metrics']['avg_score']:.2f}  agreement={s['metrics']['agreement_rate']:.2f}")
 
@@ -220,10 +209,8 @@ async def main():
     comparison = {
         "summaries": {
             "v1": v1_summary,
-            "v2": v2_summary,
             "v3": v3_summary,
-            "V1-Base":    v1_summary,
-            "V2-Rewrite": v2_summary,
+            "V1-Rewrite": v1_summary,
             "V3-Clarify": v3_summary,
         },
         "delta_v3_vs_v1": round(delta, 3),
@@ -240,16 +227,14 @@ async def main():
         json.dump(
             {
                 "v1": v1_results,
-                "v2": v2_results,
                 "v3": v3_results,
-                "V1-Base": v1_results,
-                "V2-Rewrite": v2_results,
+                "V1-Rewrite": v1_results,
                 "V3-Clarify": v3_results,
             },
             f, ensure_ascii=False, indent=2,
         )
 
-    _save_regression_cases(v1_results, v2_results, v3_results)
+    _save_regression_cases(v1_results, v3_results)
 
     if delta >= RELEASE_DELTA_TOLERANCE and hit_rate_delta >= RELEASE_HITRATE_TOLERANCE:
         print("✅ QUYẾT ĐỊNH: CHẤP NHẬN BẢN CẬP NHẬT (APPROVE)")

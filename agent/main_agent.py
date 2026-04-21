@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import sys
 
@@ -12,13 +11,6 @@ from rag.tools.query_rewriter import rewrite_query
 from config import OPENAI_API_KEY, OPENAI_MODEL
 
 _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
-SYSTEM_BASIC = """\
-Bạn là trợ lý ảo XanhSM, hãy trả lời câu hỏi của khách hàng.
-
-<context>
-{context}
-</context>"""
 
 SYSTEM_FULL = """\
 Bạn là Trợ lý AI Hỗ trợ của Xanh SM. Ưu tiên sự chính xác hơn sự đầy đủ.
@@ -101,29 +93,9 @@ async def _call_llm(messages: list[dict]) -> str:
 
 
 class AgentV1:
-    """V1 — Basic RAG: direct ChromaDB query, no rewrite, minimal prompt."""
+    """V1 — Query rewrite + full system prompt."""
 
-    name = "XanhSM-V1-Base"
-
-    async def query(self, question: str, history: list = None, **_) -> dict:
-        chunks = await _retrieve(question, top_k=5)
-        messages = [{"role": "system", "content": SYSTEM_BASIC.format(context=_build_context(chunks))}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": question})
-        answer = await _call_llm(messages)
-        return {
-            "answer": answer,
-            "contexts": [c["question"] for c in chunks],
-            "retrieved_ids": [c["id"] for c in chunks],
-            "metadata": {"agent": self.name, "chunks_used": len(chunks)},
-        }
-
-
-class AgentV2:
-    """V2 — Query rewrite + full system prompt."""
-
-    name = "XanhSM-V2-Rewrite"
+    name = "XanhSM-V1-Rewrite"
 
     async def query(self, question: str, history: list = None, **_) -> dict:
         rag_query = await rewrite_query(question, history or [])
@@ -176,7 +148,7 @@ def MainAgent() -> AgentV1:
 
 if __name__ == "__main__":
     async def _test():
-        for AgentClass in [AgentV1, AgentV2, AgentV3]:
+        for AgentClass in [AgentV1, AgentV3]:
             agent = AgentClass()
             resp = await agent.query("Làm thế nào để đăng ký làm tài xế Xanh SM?")
             print(f"\n[{agent.name}]")
