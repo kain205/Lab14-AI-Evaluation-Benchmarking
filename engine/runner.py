@@ -53,11 +53,14 @@ class BenchmarkRunner:
             "status": "fail" if judge_result["final_score"] < 3 else "pass",
         }
 
-    async def run_all(self, dataset: List[Dict], batch_size: int = 2) -> List[Dict]:
+    async def run_all(self, dataset: List[Dict], batch_size: int = 1, delay_between_requests: float = 0.5) -> List[Dict]:
         results = []
         for i in range(0, len(dataset), batch_size):
             batch = dataset[i:i + batch_size]
             tasks = [self.run_single_test(case) for case in batch]
             batch_results = await asyncio.gather(*tasks)
             results.extend(batch_results)
+            # Add delay between batches to avoid rate limit
+            if i + batch_size < len(dataset):
+                await asyncio.sleep(delay_between_requests)
         return results

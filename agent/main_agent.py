@@ -78,7 +78,9 @@ def _build_context(chunks: list[dict]) -> str:
 
 
 async def _call_llm(messages: list[dict]) -> str:
-    for attempt in range(4):
+    import random
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
             resp = await _client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -86,8 +88,12 @@ async def _call_llm(messages: list[dict]) -> str:
             )
             return resp.choices[0].message.content or ""
         except Exception as e:
-            if "429" in str(e) and attempt < 3:
-                await asyncio.sleep(2 ** attempt * 5)
+            error_str = str(e)
+            if "429" in error_str and attempt < max_retries - 1:
+                # Extract wait time from error if available
+                wait_time = 2 ** attempt * 5 + random.uniform(0, 2)  # Add jitter
+                print(f"⏳ Rate limit (attempt {attempt + 1}/{max_retries}), waiting {wait_time:.1f}s...")
+                await asyncio.sleep(wait_time)
             else:
                 raise
 
