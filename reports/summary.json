@@ -1,51 +1,69 @@
 {
   "metadata": {
-    "version": "Agent_V1_Base",
-    "total": 30,
-    "timestamp": "2026-04-21 15:56:09"
+    "version": "Agent_V1_Rewrite",
+    "total": 50,
+    "timestamp": "2026-04-21 17:26:09"
   },
   "metrics": {
-    "avg_score": 4.762,
-    "hit_rate": 1.0,
-    "agreement_rate": 0.9446666666666667
+    "avg_score": 4.301000000000001,
+    "hit_rate": 0.94,
+    "agreement_rate": 0.9470000000000001
   },
   "summaries": {
-    "V1-Base": {
+    "v1": {
       "metadata": {
-        "version": "Agent_V1_Base",
-        "total": 30,
-        "timestamp": "2026-04-21 15:56:09"
+        "version": "Agent_V1_Rewrite",
+        "total": 50,
+        "timestamp": "2026-04-21 17:26:09"
       },
       "metrics": {
-        "avg_score": 4.762,
-        "hit_rate": 1.0,
-        "agreement_rate": 0.9446666666666667
+        "avg_score": 4.301000000000001,
+        "hit_rate": 0.94,
+        "agreement_rate": 0.9470000000000001
       }
     },
-    "V2-Rewrite": {
+    "v3": {
       "metadata": {
-        "version": "Agent_V2_Rewrite",
-        "total": 30,
-        "timestamp": "2026-04-21 15:56:04"
+        "version": "Agent_V3_Clarify",
+        "total": 50,
+        "timestamp": "2026-04-21 17:29:56"
       },
       "metrics": {
-        "avg_score": 4.700999999999999,
-        "hit_rate": 1.0,
-        "agreement_rate": 0.9780000000000001
+        "avg_score": 4.458000000000001,
+        "hit_rate": 0.94,
+        "agreement_rate": 0.9601999999999999
+      }
+    },
+    "V1-Rewrite": {
+      "metadata": {
+        "version": "Agent_V1_Rewrite",
+        "total": 50,
+        "timestamp": "2026-04-21 17:26:09"
+      },
+      "metrics": {
+        "avg_score": 4.301000000000001,
+        "hit_rate": 0.94,
+        "agreement_rate": 0.9470000000000001
       }
     },
     "V3-Clarify": {
       "metadata": {
         "version": "Agent_V3_Clarify",
-        "total": 30,
-        "timestamp": "2026-04-21 15:56:04"
+        "total": 50,
+        "timestamp": "2026-04-21 17:29:56"
       },
       "metrics": {
-        "avg_score": 4.712000000000001,
-        "hit_rate": 1.0,
-        "agreement_rate": 0.9666666666666667
+        "avg_score": 4.458000000000001,
+        "hit_rate": 0.94,
+        "agreement_rate": 0.9601999999999999
       }
     }
   },
-  "delta_v3_vs_v1": -0.05
+  "delta_v3_vs_v1": 0.157,
+  "delta_hit_rate_v3_vs_v1": 0.0,
+  "gates": {
+    "regression_margin": 0.3,
+    "release_delta_tolerance": -0.1,
+    "release_hit_rate_tolerance": -0.02
+  }
 }
